@@ -62,9 +62,21 @@ public class ExpenseTool {
         return expenseRepository.sumByCategory(category);
     }
 
+
+    @Tool(description = "Get expenses for a specific category within a date range")
+    public List<Expense> getExpensesByCategoryAndDateRange(
+            @ToolParam(description = "Category: FOOD, TRANSPORT, ENTERTAINMENT, HEALTH, UTILITIES, SHOPPING, OTHER") Category category,
+            @ToolParam(description = "Start date YYYY-MM-DD") LocalDate start,
+            @ToolParam(description = "End date YYYY-MM-DD") LocalDate end) {
+        return expenseRepository.findByCategoryAndDateBetween(category, start, end);
+    }
+
     @Tool(description = "Delete an expense by ID")
     public String deleteExpense(
             @ToolParam(description = "ID of the expense to delete") Long id) {
+        if (!expenseRepository.existsById(id)) {
+            return "Expense with ID " + id + " not found.";
+        }
         expenseRepository.deleteById(id);
         return "Expense " + id + " deleted.";
     }
