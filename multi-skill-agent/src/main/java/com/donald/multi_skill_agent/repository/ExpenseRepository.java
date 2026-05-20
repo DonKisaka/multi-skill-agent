@@ -17,6 +17,8 @@ public interface ExpenseRepository extends JpaRepository<Expense, Long> {
 
     List<Expense> findByAmountGreaterThan(BigDecimal amount);
 
-    @Query("SELECT SUM(e.amount) FROM Expense e WHERE e.category = :category")
+    List<Expense> findByCategoryAndDateBetween(Category category, LocalDate start, LocalDate end);
+
+    @Query("SELECT COALESCE(SUM(e.amount), 0) FROM Expense e WHERE e.category = :category")
     BigDecimal sumByCategory(@Param("category") Category category);
 }
