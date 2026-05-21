@@ -5,5 +5,8 @@ import org.springframework.ai.tool.ToolCallback;
 public interface Skill {
     String getName();
     String getInstructions();
-    ToolCallback[] getTools();
+
+    default ToolCallback[] getTools() {
+        return new ToolCallback[0];  // default: instruction-only skill
+    }
 }
