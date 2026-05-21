@@ -37,7 +37,11 @@ public class ChatClientConfig {
                 .flatMap(skill -> Arrays.stream(skill.getTools()))
                 .toArray(ToolCallback[]::new);
 
-        return builder -> builder.defaultTools(allTools);
+        return builder -> {
+            if (allTools.length > 0) {
+                builder.defaultToolCallbacks(allTools);
+            }
+        };
     }
 
     @Bean
