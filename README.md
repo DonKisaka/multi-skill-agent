@@ -1,6 +1,6 @@
 # Multi-Skill Agent
 
-A conversational AI agent built with Spring Boot and Spring AI that manages personal expenses and tasks through natural language. The agent streams responses in real time and maintains conversation memory across turns.
+A conversational AI agent that manages personal expenses and tasks through natural language. The agent streams responses in real time and maintains conversation memory across turns.
 
 ---
 
