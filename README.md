@@ -8,7 +8,7 @@ A conversational AI agent that manages personal expenses and tasks through natur
 
 Most AI chat assistants are stateless and general-purpose — they cannot take meaningful actions on your behalf or remember context between turns. The goal of this project was to build a **personal assistant agent** that:
 
-- Understands natural language requests like _"Add a $45 food expense for today"_ or _"Mark task 3 as done"_
+- Understands natural language requests like _"Add a sh.450 food expense for today"_ or _"Mark task 3 as done"_
 - Executes those requests by calling real functions against a real database
 - Asks for clarification instead of guessing when information is missing
 - Plans before acting on multi-step requests
@@ -23,7 +23,7 @@ Most AI chat assistants are stateless and general-purpose — they cannot take m
 
 ```
 POST /api/v1/agent/chat
-{ "sessionId": "abc-123", "message": "Add a $30 food expense for today" }
+{ "sessionId": "abc-123", "message": "Add a sh.300 food expense for today" }
         │
         ▼
   AgentController  (thin HTTP adapter)
