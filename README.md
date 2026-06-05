@@ -1,234 +1,292 @@
-# Multi-Skill Agent
+# Dev Daily Agent
 
-A conversational AI agent built with Spring Boot and Spring AI that manages personal expenses and tasks through natural language. The agent streams responses in real time and maintains conversation memory across turns.
+  A conversational AI agent built with Spring Boot and Spring AI that helps developers manage tasks, track expenses, and generate
+  daily standup reports through natural language. The agent streams responses in real time, maintains conversation memory across
+  turns, and serves a browser-based chat UI.
 
----
+  ---
 
-## Problem Statement
+  ## Problem Statement
 
-Most AI chat assistants are stateless and general-purpose — they cannot take meaningful actions on your behalf or remember context between turns. The goal of this project was to build a **personal assistant agent** that:
+  Developers waste time every morning writing standup updates — opening Jira, Slack, and Git history just to summarize what they did.
+   On top of that, task and expense tracking is scattered across tools. This agent solves that in one place:
 
-- Understands natural language requests like _"Add a $45 food expense for today"_ or _"Mark task 3 as done"_
-- Executes those requests by calling real functions against a real database
-- Asks for clarification instead of guessing when information is missing
-- Plans before acting on multi-step requests
-- Maintains conversation memory so follow-up questions make sense
-- Keeps different users' data completely isolated from each other
+  - Understands natural language like _"Add task: fix null pointer bug"_ or _"Generate my standup for today"_
+  - Executes requests by calling real functions against a real PostgreSQL database
+  - Automatically generates a formatted standup (Yesterday / Today / Blockers) from your actual task history
+  - Asks for clarification instead of guessing when information is missing
+  - Plans before acting on multi-step requests
+  - Maintains conversation memory so follow-up questions make sense
+  - Keeps different users' data completely isolated via session ID
 
----
+  ---
 
-## Architecture
+  ## Demo
 
-### High-Level Flow
+  Open `http://localhost:8080` after starting the app.
 
-```
-POST /api/v1/agent/chat
-{ "sessionId": "abc-123", "message": "Add a $30 food expense for today" }
-        │
-        ▼
-  AgentController  (thin HTTP adapter)
-        │
-        ▼
-  AssistantAgent   (Spring AI ChatClient)
-        │
-        ├── System prompt (all skill instructions merged)
-        ├── Conversation memory (last 20 messages, scoped to sessionId)
-        └── Tool registry (all @Tool methods from all skills)
-        │
-        ▼
-  Anthropic Claude (claude-haiku-4-5)
-        │
-        ▼  (decides which tool to call)
-  ExpenseTool / TaskTool / AskUserTool / TodoWriteTool
-        │
-        ▼
-  PostgreSQL (expenses) / ConcurrentHashMap (tasks, plans)
-        │
-        ▼
-  Flux<String> → Server-Sent Events → client
-```
+  **Try this flow:**
+  1. `Add task: implement OAuth login`
+  2. `Update task 1 to IN_PROGRESS`
+  3. `Add task: fix null pointer in payment service`
+  4. `Update task 2 to DONE`
+  5. `Add expense: $200 client lunch`
+  6. `Generate my standup for today`
 
----
+  Claude reads your task history, formats the standup, saves it to the database, and the history panel updates automatically.
 
-## Architectural Decisions
+  ---
 
-### 1. Skill Abstraction
+  ## Architecture
 
-Every capability is modelled as a `Skill` — an interface with three methods:
+  ### High-Level Flow
 
-```java
-public interface Skill {
-    String getName();
-    String getInstructions();           // contributed to the system prompt
-    default ToolCallback[] getTools();  // callable functions exposed to the LLM
-}
-```
+  Browser (http://localhost:8080)
+          │  POST /api/v1/agent/chat  (SSE stream)
+          │  GET  /api/v1/agent/standup/history
+          ▼
+    AgentController  (thin HTTP adapter)
+          │
+          ▼
+    AssistantAgent   (Spring AI ChatClient)
+          │
+          ├── System prompt (all skill instructions merged)
+          ├── Conversation memory (last 20 messages, scoped to sessionId)
+          └── Tool registry (all @Tool methods from all skills)
+          │
+          ▼
+    Anthropic Claude (claude-haiku-4-5)
+          │
+          ▼  (decides which tools to call)
+    ExpenseTool / TaskTool / StandupTool / AskUserTool / TodoWriteTool
+          │
+          ▼
+    PostgreSQL (expenses, standup_reports) / ConcurrentHashMap (tasks, plans)
+          │
+          ▼
+    Flux → Server-Sent Events → Browser UI
 
-This separates **what the AI is told** (instructions) from **what the AI can do** (tools). Adding a new capability means writing a new class that implements `Skill` — no changes to core agent logic are required.
+  ---
 
-Skills are automatically discovered by Spring's dependency injection and composed in `ChatClientConfig`:
-- All instructions are merged into a single system prompt
-- All tools are flattened into a single tool registry
+  ## Architectural Decisions
 
-### 2. Session Isolation via `sessionId`
+  ### 1. Skill Abstraction
 
-Every request carries a `sessionId` string. This single value drives two isolation mechanisms:
+  Every capability is modelled as a `Skill` — an interface with three methods:
 
-| Mechanism | How `sessionId` is used |
-|---|---|
-| Conversation memory | `ChatMemory.CONVERSATION_ID` — each session has its own 20-message window |
-| Task and plan storage | Map key in `ConcurrentHashMap` — tasks and plans are namespaced per session |
-| System prompt | `{sessionId}` template variable — the LLM is told the current session ID so it can pass it to tools correctly |
+  java
+  public interface Skill {
+      String getName();
+      String getInstructions();           // contributed to the system prompt
+      default ToolCallback[] getTools();  // callable functions exposed to the LLM
+  }
 
-### 3. Instruction-Only Skills
+  This separates what the AI is told (instructions) from what the AI can do (tools). Adding a new capability means writing one new
+  class that implements Skill — no changes to core agent logic required.
 
-Not all skills need tools. `SummarySkill` contributes only instructions to the system prompt — it teaches the AI how to format and present summaries using data already available from the other skills. This keeps formatting logic out of code and makes it easy to adjust without redeployment.
+  Skills are automatically discovered by Spring's dependency injection and composed in ChatClientConfig:
+  - All instructions are merged into a single system prompt
+  - All tools are flattened into a single tool registry
 
-### 4. Streaming Responses with WebFlux
+  2. Session Isolation via sessionId
 
-The endpoint returns `Flux<String>` over `text/event-stream` (Server-Sent Events). This means the client receives tokens as they are generated rather than waiting for the full response. Spring WebFlux with Reactor Netty handles the non-blocking I/O, making this efficient under concurrent load.
+  Every request carries a sessionId string. This single value drives all isolation:
 
-### 5. Heterogeneous Storage
+  ┌──────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │      Mechanism       │                                         How sessionId is used                                         │
+  ├──────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Conversation memory  │ ChatMemory.CONVERSATION_ID — each session has its own 20-message window                               │
+  ├──────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Task and plan        │ Map key in ConcurrentHashMap — tasks and plans are namespaced per session                             │
+  │ storage              │                                                                                                       │
+  ├──────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Standup history      │ Column filter in PostgreSQL — standups are scoped to the session                                      │
+  ├──────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ System prompt        │ {sessionId} template variable — the LLM is told the current session ID so it passes it to tools       │
+  │                      │ correctly                                                                                             │
+  └──────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
-Different data has different persistence requirements:
+  3. Standup Generation as a Skill
 
-| Data | Storage | Reasoning |
-|---|---|---|
-| Expenses | PostgreSQL via JPA | Needs to survive restarts; financial data must be durable |
-| Tasks | In-memory `ConcurrentHashMap` | Scoped to a session; no persistence needed |
-| Execution plans | In-memory `ConcurrentHashMap` | Transient planning state; discarded after completion |
-| Conversation history | In-memory `MessageWindowChatMemory` | Short-lived context; 20-message sliding window is sufficient |
+  The standup generator is implemented entirely as a StandupSkill. Its instructions tell Claude to:
+  1. Call listTasks() to read the current session's task state
+  2. Format output as Yesterday / Today / Blockers
+  3. Call saveStandup() to persist the result
 
-### 6. AskUser Guardrail
+  No standup-specific logic lives in the agent core — it's a pure skill addition.
 
-The `AskUserTool` + `AskUserSkill` combination provides a named mechanism for the agent to pause and request missing information rather than hallucinating values. The tool description explicitly instructs the LLM: _"Do NOT guess or assume missing values — ask instead."_ Having both a prompt-level instruction and a callable tool makes this behaviour significantly more reliable than either alone.
+  4. Instruction-Only Skills
 
-### 7. Agent Planning with TodoWriteTool
+  Not all skills need tools. SummarySkill contributes only instructions to the system prompt — it teaches the AI how to format and
+  present summaries using data already available from other skills. This keeps formatting logic out of code.
 
-For multi-step requests, the `TodoWriteTool` forces the agent to write an explicit execution plan before acting. This addresses a common LLM failure mode where the model loses track of steps mid-execution. The plan is stored per session and can be re-read at any point during execution.
+  5. Streaming Responses with WebFlux
 
----
+  The endpoint returns Flux<String> over text/event-stream (Server-Sent Events). The browser receives tokens as they are generated
+  rather than waiting for the full response. Spring WebFlux with Reactor Netty handles the non-blocking I/O.
 
-## Tech Stack
+  6. Heterogeneous Storage
 
-| Layer | Technology |
-|---|---|
-| Language | Java 25 |
-| Framework | Spring Boot 4.0.6 |
-| AI Framework | Spring AI 2.0.0-M6 |
-| LLM | Anthropic Claude (claude-haiku-4-5) |
-| Web Layer | Spring WebFlux (Reactor Netty) |
-| Persistence | Spring Data JPA + Hibernate 7 |
-| Database | PostgreSQL 17 |
-| Connection Pool | HikariCP |
-| Build Tool | Maven |
+  ┌──────────────────────┬───────────────────────────────────┬────────────────────────────────────────────┐
+  │         Data         │              Storage              │                 Reasoning                  │
+  ├──────────────────────┼───────────────────────────────────┼────────────────────────────────────────────┤
+  │ Expenses             │ PostgreSQL via JPA                │ Financial data must be durable             │
+  ├──────────────────────┼───────────────────────────────────┼────────────────────────────────────────────┤
+  │ Standup reports      │ PostgreSQL via JPA                │ Persistent record across sessions          │
+  ├──────────────────────┼───────────────────────────────────┼────────────────────────────────────────────┤
+  │ Tasks                │ In-memory ConcurrentHashMap       │ Scoped to a session; no persistence needed │
+  ├──────────────────────┼───────────────────────────────────┼────────────────────────────────────────────┤
+  │ Execution plans      │ In-memory ConcurrentHashMap       │ Transient planning state                   │
+  ├──────────────────────┼───────────────────────────────────┼────────────────────────────────────────────┤
+  │ Conversation history │ In-memory MessageWindowChatMemory │ 20-message sliding window                  │
+  └──────────────────────┴───────────────────────────────────┴────────────────────────────────────────────┘
 
----
+  7. AskUser Guardrail
 
-## Project Structure
+  The AskUserTool + AskUserSkill combination provides a named mechanism for the agent to pause and request missing information rather
+   than hallucinating values. Having both a prompt-level instruction and a callable tool makes this behaviour significantly more
+  reliable than either alone.
 
-```
-src/main/java/com/donald/multi_skill_agent/
-├── agent/
-│   └── AssistantAgent.java          # ChatClient wrapper; entry point for all chat requests
-├── config/
-│   └── ChatClientConfig.java        # Wires skills, tools, and memory into the ChatClient
-├── controller/
-│   └── AgentController.java         # POST /api/v1/agent/chat — thin HTTP adapter
-├── model/
-│   ├── Expense.java                 # JPA entity
-│   └── Category.java                # Enum: FOOD, TRANSPORT, ENTERTAINMENT, etc.
-├── repository/
-│   └── ExpenseRepository.java       # Spring Data JPA with custom JPQL queries
-├── skills/
-│   ├── Skill.java                   # Interface: getName, getInstructions, getTools
-│   ├── ExpenseSkill.java            # Expense management instructions + ExpenseTool
-│   ├── TaskSkill.java               # Task management instructions + TaskTool
-│   ├── SummarySkill.java            # Summarization instructions only (no tools)
-│   └── AskUserSkill.java            # Clarification instructions + AskUserTool
-└── tools/
-    ├── ExpenseTool.java             # 8 @Tool methods backed by PostgreSQL
-    ├── TaskTool.java                # 5 @Tool methods backed by in-memory ConcurrentHashMap
-    ├── AskUserTool.java             # 1 @Tool method — asks the user a clarifying question
-    └── TodoWriteTool.java           # 3 @Tool methods — agent-side execution planning
-```
+  8. Agent Planning with TodoWriteTool
 
----
+  For multi-step requests, the TodoWriteTool forces the agent to write an explicit execution plan before acting. This addresses a
+  common LLM failure mode where the model loses track of steps mid-execution.
 
-## Prerequisites
+  ---
+  Tech Stack
 
-- Java 25
-- PostgreSQL running on `localhost:5432`
-- An Anthropic API key with credits
+  ┌─────────────────┬──────────────────────────────────────┐
+  │      Layer      │              Technology              │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Language        │ Java 25                              │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Framework       │ Spring Boot 4.0.6                    │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ AI Framework    │ Spring AI 2.0.0-M6                   │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ LLM             │ Anthropic Claude (claude-haiku-4-5)  │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Web Layer       │ Spring WebFlux (Reactor Netty)       │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Persistence     │ Spring Data JPA + Hibernate 7        │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Database        │ PostgreSQL 17                        │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Connection Pool │ HikariCP                             │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Build Tool      │ Maven                                │
+  ├─────────────────┼──────────────────────────────────────┤
+  │ Frontend        │ Plain HTML / CSS / JS (no framework) │
+  └─────────────────┴──────────────────────────────────────┘
 
----
+  ---
+  Project Structure
 
-## Setup
+  src/main/java/com/donald/multi_skill_agent/
+  ├── agent/
+  │   └── AssistantAgent.java          # ChatClient wrapper; entry point for all chat requests
+  ├── config/
+  │   └── ChatClientConfig.java        # Wires skills, tools, and memory into the ChatClient
+  ├── controller/
+  │   └── AgentController.java         # POST /api/v1/agent/chat + GET /standup/history
+  ├── model/
+  │   ├── Expense.java                 # JPA entity: expenses table
+  │   ├── Category.java                # Enum: FOOD, TRANSPORT, ENTERTAINMENT, etc.
+  │   └── Standup.java                 # JPA entity: standup_reports table
+  ├── repository/
+  │   ├── ExpenseRepository.java       # Spring Data JPA with custom JPQL queries
+  │   └── StandupRepository.java       # findTop5BySessionIdOrderByCreatedAtDesc
+  ├── skills/
+  │   ├── Skill.java                   # Interface: getName, getInstructions, getTools
+  │   ├── ExpenseSkill.java            # Expense management instructions + ExpenseTool
+  │   ├── TaskSkill.java               # Task management instructions + TaskTool
+  │   ├── StandupSkill.java            # Standup generation instructions + StandupTool
+  │   ├── SummarySkill.java            # Summarization instructions only (no tools)
+  │   └── AskUserSkill.java            # Clarification instructions + AskUserTool
+  └── tools/
+      ├── ExpenseTool.java             # 8 @Tool methods backed by PostgreSQL
+      ├── TaskTool.java                # 5 @Tool methods backed by in-memory ConcurrentHashMap
+      ├── StandupTool.java             # 2 @Tool methods: saveStandup, getStandupHistory
+      ├── AskUserTool.java             # 1 @Tool method — asks the user a clarifying question
+      └── TodoWriteTool.java           # 3 @Tool methods — agent-side execution planning
 
-**1. Create the database**
+  src/main/resources/
+  ├── static/
+  │   └── index.html                   # Browser chat UI with SSE streaming + standup history panel
+  └── application.properties
 
-```sql
-CREATE USER assistant_user WITH PASSWORD 'assistantuserpassword';
-CREATE DATABASE assistant_db OWNER assistant_user;
-```
+  ---
+  Prerequisites
 
-**2. Set the environment variable**
+  - Java 25
+  - Docker (for PostgreSQL via docker-compose)
+  - An Anthropic API key
 
-```powershell
-# Windows PowerShell
-$env:ANTHROPIC_API_KEY = "sk-ant-..."
-```
+  ---
+  Setup
 
-Or set it permanently via System Properties → Environment Variables, then restart IntelliJ.
+  1. Start PostgreSQL
 
-**3. Run the application**
+  docker-compose up -d
 
-```bash
-./mvnw spring-boot:run
-```
+  2. Set the API key
 
-The app starts on `http://localhost:8080`. Hibernate will create the `expenses` table automatically on first run (`ddl-auto=update`).
+  # Windows PowerShell
+  $env:ANTHROPIC_API_KEY = "sk-ant-..."
 
----
+  # Mac/Linux
+  export ANTHROPIC_API_KEY=sk-ant-...
 
-## API
+  3. Run the application
 
-### Chat
+  ./mvnw spring-boot:run
 
-```
-POST /api/v1/agent/chat
-Content-Type: application/json
-Accept: text/event-stream
-```
+  Open http://localhost:8080. Hibernate auto-creates all tables on first run.
 
-```json
-{
-  "sessionId": "your-session-id",
-  "message": "Add a $45 food expense for lunch today"
-}
-```
+  ---
+  API
 
-Use the same `sessionId` across requests to maintain conversation memory and task continuity. The response streams back as Server-Sent Events.
+  Chat
 
-### Example Requests
+  POST /api/v1/agent/chat
+  Content-Type: application/json
+  Accept: text/event-stream
 
-```json
-{ "sessionId": "s1", "message": "Add a $45 food expense for lunch on 2026-05-22" }
-{ "sessionId": "s1", "message": "Show me all my transport expenses" }
-{ "sessionId": "s1", "message": "How much have I spent on food in total?" }
-{ "sessionId": "s1", "message": "Add a task: review monthly budget" }
-{ "sessionId": "s1", "message": "Mark task 1 as done" }
-{ "sessionId": "s1", "message": "Give me a summary of my expenses and tasks" }
-```
+  { "sessionId": "your-session-id", "message": "Generate my standup for today" }
 
----
+  Standup History
 
-## Skills Reference
+  GET /api/v1/agent/standup/history?sessionId=your-session-id
 
-| Skill | Tools | Purpose |
-|---|---|---|
-| `expense-skill` | 8 | Add, filter, aggregate and delete expenses in PostgreSQL |
-| `task-skill` | 5 | Create and manage tasks scoped to the current session |
-| `summary-skill` | 0 | Instructs the agent on how to format cross-skill summaries |
-| `ask-user-skill` | 1 | Pauses execution to ask the user for missing information |
-| `todo-write-tool` | 3 | Agent writes and follows an execution plan for multi-step tasks |
+  Returns the last 5 standup reports for the session as JSON.
+
+  Example Requests
+
+  { "sessionId": "s1", "message": "Add task: implement OAuth login" }
+  { "sessionId": "s1", "message": "Update task 1 to IN_PROGRESS" }
+  { "sessionId": "s1", "message": "Add task: fix null pointer in payment service" }
+  { "sessionId": "s1", "message": "Update task 2 to DONE" }
+  { "sessionId": "s1", "message": "Add expense: $200 client lunch" }
+  { "sessionId": "s1", "message": "Generate my standup for today" }
+  { "sessionId": "s1", "message": "Show me all my expenses this month" }
+
+  ---
+  Skills Reference
+
+  ┌────────────────┬───────┬─────────────────────────────────────────────────────────────────┐
+  │     Skill      │ Tools │                             Purpose                             │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ expense-skill  │ 8     │ Add, filter, aggregate and delete expenses in PostgreSQL        │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ task-skill     │ 5     │ Create and manage tasks scoped to the current session           │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ standup-skill  │ 2     │ Generate and persist daily standup reports from task history    │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ summary-skill  │ 0     │ Instructs the agent on how to format cross-skill summaries      │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ ask-user-skill │ 1     │ Pauses execution to ask the user for missing information        │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ planning-skill │ 3     │ Agent writes and follows an execution plan for multi-step tasks │
+  ├────────────────┼───────┼─────────────────────────────────────────────────────────────────┤
+  │ ```            │       │                                                                 │
+  └────────────────┴───────┴─────────────────────────────────────────────────────────────────┘
